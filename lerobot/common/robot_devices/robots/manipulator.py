@@ -20,6 +20,9 @@ from lerobot.common.robot_devices.motors.utils import MotorsBus
 from lerobot.common.robot_devices.robots.utils import get_arm_id
 from lerobot.common.robot_devices.utils import RobotDeviceAlreadyConnectedError, RobotDeviceNotConnectedError
 
+from lerobot.scripts.kin_so100 import InverseKinematicsso100
+import cProfile
+
 
 def ensure_safe_goal_position(
     goal_pos: torch.Tensor, present_pos: torch.Tensor, max_relative_target: float | list[float]
@@ -225,6 +228,10 @@ class ManipulatorRobot:
         self.cameras = self.config.cameras
         self.is_connected = False
         self.logs = {}
+
+        # initialize Inverse Kinematics
+        self.ik_leader = InverseKinematicsso100()
+        self.ik_follower = InverseKinematicsso100()
 
     @property
     def has_camera(self):
@@ -465,6 +472,92 @@ class ManipulatorRobot:
             self.follower_arms[name].write("Maximum_Acceleration", 254)
             self.follower_arms[name].write("Acceleration", 254)
 
+    def teleop_kin_step(
+        self, record_data=False
+    ) -> None | tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+        if not self.is_connected:
+            raise RobotDeviceNotConnectedError(
+                "ManipulatorRobot is not connected. You need to run `robot.connect()`."
+            )
+        # # Initialize kinematic objects for arms
+        # ik_leader = InverseKinematicsso100()
+        # ik_follower = InverseKinematicsso100()
+
+        profiler = cProfile.Profile()
+        profiler.enable()
+
+        # Get the kos position and orientation
+        kos_pos = []
+        kos_rot = []
+
+        # print("called the stepp ")
+
+        # for now from teleoperation of the arm
+        leader_pos = {}
+        for name in self.leader_arms:
+            before_lread_t = time.perf_counter()
+            leader_pos[name] = self.leader_arms[name].read("Present_Position")
+            leader_pos[name] = torch.from_numpy(leader_pos[name])
+            self.logs[f"read_leader_{name}_pos_dt_s"] = time.perf_counter() - before_lread_t
+        
+        kos_pos, kos_rot = self.ik_leader.forward_kinematics(leader_pos["main"])
+
+
+        # calculate motor positions
+        follower_motor_pos = torch.from_numpy(self.ik_follower.inverse_kinematics(kos_pos, kos_rot))
+        follower_goal_pos = {}
+        for name in self.follower_arms:
+            before_fwrite_t = time.perf_counter()
+            # follower_goal_pos[name] = follower_motor_pos[i]
+            goal_pos = follower_motor_pos
+
+            # Cap goal position when too far away from present position.
+            # Slower fps expected due to reading from the follower.
+            if self.config.max_relative_target is not None:
+                present_pos = self.follower_arms[name].read("Present_Position")
+                present_pos = torch.from_numpy(present_pos)
+
+                goal_pos = ensure_safe_goal_position(goal_pos, present_pos, self.config.max_relative_target)
+            # Used when record_data=True
+            follower_goal_pos[name] = goal_pos
+            goal_pos = np.int32(goal_pos)
+            self.follower_arms[name].write("Goal_Position", goal_pos)
+            self.logs[f"write_follower_{name}_goal_pos_dt_s"] = time.perf_counter() - before_fwrite_t
+        # Early exit when recording data is not requested
+        if not record_data:
+            return
+        
+        profiler.disable()
+        profiler.print_stats(sort='time')
+        
+        # for data collection leave it for now, but modifiy later
+        # Read follower position
+        follower_pos = {}
+        for name in self.follower_arms:
+            before_fread_t = time.perf_counter()
+            follower_pos[name] = self.follower_arms[name].read("Present_Position")
+            follower_pos[name] = torch.from_numpy(follower_pos[name])
+            self.logs[f"read_follower_{name}_pos_dt_s"] = time.perf_counter() - before_fread_t
+        # Create state by concatenating follower current position
+        state = []
+        for name in self.follower_arms:
+            if name in follower_pos:
+                state.append(follower_pos[name])
+        state = torch.cat(state)
+        # Create action by concatenating follower goal position
+        action = []
+        for name in self.follower_arms:
+            if name in follower_goal_pos:
+                action.append(follower_goal_pos[name])
+        action = torch.cat(action)
+        # Populate output dictionnaries
+        obs_dict, action_dict = {}, {}
+        obs_dict["observation.state"] = state
+        action_dict["action"] = action
+
+        return obs_dict, action_dict
+    
+
     def teleop_step(
         self, record_data=False
     ) -> None | tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
@@ -481,6 +574,11 @@ class ManipulatorRobot:
             leader_pos[name] = torch.from_numpy(leader_pos[name])
             self.logs[f"read_leader_{name}_pos_dt_s"] = time.perf_counter() - before_lread_t
 
+        ik = InverseKinematicsso100()
+        position, rotation = ik.forward_kinematics(leader_pos["main"])
+        # ik.inverse_kinematics(position, rotation)
+        # print(leader_pos["main"])
+
         # Send goal position to the follower
         follower_goal_pos = {}
         for name in self.follower_arms:
@@ -496,6 +594,8 @@ class ManipulatorRobot:
 
             # Used when record_data=True
             follower_goal_pos[name] = goal_pos
+
+            # print("goal_pos", goal_pos)
 
             goal_pos = goal_pos.numpy().astype(np.int32)
             self.follower_arms[name].write("Goal_Position", goal_pos)
@@ -583,6 +683,7 @@ class ManipulatorRobot:
         for name in self.cameras:
             obs_dict[f"observation.images.{name}"] = images[name]
         return obs_dict
+    
 
     def send_action(self, action: torch.Tensor) -> torch.Tensor:
         """Command the follower arms to move to a target joint configuration.

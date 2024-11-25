@@ -192,6 +192,21 @@ def teleoperate(
         display_cameras=display_cameras,
     )
 
+@safe_disconnect
+def teleoperate_kin(
+    robot: Robot, fps: int | None = None, teleop_time_s: float | None = None, display_cameras: bool = False
+):
+    # initialize the robot
+
+    control_loop(
+        robot,
+        control_time_s=teleop_time_s,
+        fps=fps,
+        teleoperate_kin=True,
+        display_cameras=display_cameras,
+
+    )
+
 
 @safe_disconnect
 def record(
@@ -383,6 +398,17 @@ if __name__ == "__main__":
         help="Display all cameras on screen (set to 1 to display or 0).",
     )
 
+    parser_teleop_kin = subparsers.add_parser("teleoperate_kin", parents=[base_parser])
+    parser_teleop_kin.add_argument(
+        "--fps", type=none_or_int, default=None, help="Frames per second (set to None to disable)"
+    )
+    parser_teleop_kin.add_argument(
+        "--display-cameras",
+        type=int,
+        default=1,
+        help="Display all cameras on screen (set to 1 to display or 0).",
+    )
+
     parser_record = subparsers.add_parser("record", parents=[base_parser])
     parser_record.add_argument(
         "--fps", type=none_or_int, default=None, help="Frames per second (set to None to disable)"
@@ -517,6 +543,9 @@ if __name__ == "__main__":
 
     elif control_mode == "teleoperate":
         teleoperate(robot, **kwargs)
+
+    elif control_mode == "teleoperate_kin":
+        teleoperate_kin(robot, **kwargs)
 
     elif control_mode == "record":
         record(robot, **kwargs)

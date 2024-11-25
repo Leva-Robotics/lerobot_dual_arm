@@ -226,6 +226,7 @@ def control_loop(
     robot,
     control_time_s=None,
     teleoperate=False,
+    teleoperate_kin = False,
     display_cameras=False,
     dataset=None,
     events=None,
@@ -257,6 +258,8 @@ def control_loop(
 
         if teleoperate:
             observation, action = robot.teleop_step(record_data=True)
+        elif teleoperate_kin:
+            observation, action = robot.teleop_kin_step(record_data=True)
         else:
             observation = robot.capture_observation()
 
